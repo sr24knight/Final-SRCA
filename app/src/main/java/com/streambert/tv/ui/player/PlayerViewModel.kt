@@ -11,6 +11,7 @@ import com.streambert.tv.data.stream.StreamResolution
 import com.streambert.tv.data.stream.SubtitleRepository
 import com.streambert.tv.data.stream.SubtitleTrack
 import com.streambert.tv.data.tmdb.TmdbRepository
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -92,15 +93,43 @@ class PlayerViewModel(
         viewModelScope.launch {
             val startMs = progress.get(progressKey)?.positionMs ?: 0L
             val tunneling = settings.currentTunnelingEnabled()
+            val s = season.takeIf { it > 0 }
+            val e = episode.takeIf { it > 0 }
+
+            // ── Fire off every independent lookup CONCURRENTLY ──────────────
+            // Previously these ran one-after-another (engine → nextEpisode →
+            // imdbId → subtitles) *before* stream resolution even started, so
+            // the player couldn't begin until all of them plus resolution had
+            // finished. Now they overlap with each other and with the (usually
+            // longest) stream-resolution + debrid step, so the only thing that
+            // gates playback is getting the actual stream URL.
+
             // Resolve "auto" to a concrete engine: ExoPlayer for movies/TV,
             // libmpv for anime. The picker's other values pass through as-is.
-            val engine = when (settings.currentPlayerEngine()) {
-                SettingsRepository.ENGINE_AUTO ->
-                    if (runCatching { tmdb.isAnime(id, type) }.getOrDefault(false))
-                        SettingsRepository.ENGINE_MPV else SettingsRepository.ENGINE_EXOPLAYER
-                SettingsRepository.ENGINE_MPV -> SettingsRepository.ENGINE_MPV
-                else -> SettingsRepository.ENGINE_EXOPLAYER
+            val engineDeferred = async {
+                when (settings.currentPlayerEngine()) {
+                    SettingsRepository.ENGINE_AUTO ->
+                        if (runCatching { tmdb.isAnime(id, type) }.getOrDefault(false))
+                            SettingsRepository.ENGINE_MPV else SettingsRepository.ENGINE_EXOPLAYER
+                    SettingsRepository.ENGINE_MPV -> SettingsRepository.ENGINE_MPV
+                    else -> SettingsRepository.ENGINE_EXOPLAYER
+                }
             }
+            // Next episode (next in season, else first of next season). Guards
+            // autoplay-next AND the Continue-Watching "next up".
+            val nextEpisodeDeferred = async { if (season > 0) computeNextEpisode() else null }
+            // IMDb id (needed for both subtitles and stream lookup). Wrapped so a
+            // failure yields null instead of cancelling the whole resolve scope.
+            val imdbDeferred = async { runCatching { tmdb.imdbId(id, type) }.getOrNull() }
+            // Subtitles depend on the IMDb id but otherwise run in the background
+            // so fetching them no longer blocks the player from starting.
+            val subsDeferred = async {
+                val imdb = imdbDeferred.await()
+                if (!imdb.isNullOrBlank())
+                    runCatching { subtitles.fetch(imdb, s, e) }.getOrDefault(emptyList())
+                else emptyList()
+            }
+
             val prefs = PlaybackPrefs(
                 hwdecMode = if (settings.currentMpvHardwareDecoding()) "auto-safe" else "no",
                 preferredAudioLang = settings.currentPreferredAudioLanguage(),
@@ -109,10 +138,6 @@ class PlayerViewModel(
                 skipIntroEnabled = settings.currentSkipIntroEnabled(),
                 isSeries = season > 0
             )
-            // Compute the next episode (next in season, else first of next
-            // season). Guards autoplay-next AND the Continue-Watching "next up".
-            nextEpisode = if (season > 0) computeNextEpisode() else null
-            val hasNext = nextEpisode != null
             val subScale = settings.currentSubtitleFraction()
             val subStyle = SubtitleStyle(
                 delayMs = settings.currentSubtitleDelayMs(),
@@ -122,19 +147,30 @@ class PlayerViewModel(
                 opacityPercent = settings.currentSubtitleTextOpacityPercent(),
                 outline = settings.currentSubtitleOutline()
             )
-            val s = season.takeIf { it > 0 }
-            val e = episode.takeIf { it > 0 }
 
-            // Resolve IMDb id up-front (used for both subtitles and stream lookup).
-            val imdb = tmdb.imdbId(id, type)
-            val subs = if (!imdb.isNullOrBlank())
-                runCatching { subtitles.fetch(imdb, s, e) }.getOrDefault(emptyList())
-            else emptyList()
+            // Once we have a URL, await the concurrent lookups (which have been
+            // running throughout resolution, so this is usually instant) and go
+            // Ready. Emitting Ready is what triggers PlaybackFactory.prepare().
+            suspend fun goReady(url: String, label: String) {
+                nextEpisode = nextEpisodeDeferred.await()
+                _state.value = PlayerUiState.Ready(
+                    url = url,
+                    title = label,
+                    startPositionMs = startMs,
+                    tunnelingEnabled = tunneling,
+                    subtitles = subsDeferred.await(),
+                    subtitleScale = subScale,
+                    subtitleStyle = subStyle,
+                    playerEngine = engineDeferred.await(),
+                    prefs = prefs,
+                    hasNextEpisode = nextEpisode != null
+                )
+            }
 
             if (directUrl.isNotBlank()) {
                 playingUrl = directUrl
                 playingHash = directHash
-                _state.value = PlayerUiState.Ready(directUrl, title.ifBlank { "Stream" }, startMs, tunneling, subs, subScale, subStyle, engine, prefs, hasNext)
+                goReady(directUrl, title.ifBlank { "Stream" })
                 return@launch
             }
 
@@ -145,7 +181,7 @@ class PlayerViewModel(
                     is StreamResolution.Ready -> {
                         playingUrl = r.url
                         playingHash = directHash
-                        _state.value = PlayerUiState.Ready(r.url, title.ifBlank { r.label }, startMs, tunneling, subs, subScale, subStyle, engine, prefs, hasNext)
+                        goReady(r.url, title.ifBlank { r.label })
                     }
                     is StreamResolution.Failure -> _state.value = PlayerUiState.Error(r.message)
                     is StreamResolution.Progress -> _state.value = PlayerUiState.Resolving(r.message)
@@ -153,6 +189,7 @@ class PlayerViewModel(
                 return@launch
             }
 
+            val imdb = imdbDeferred.await()
             if (imdb.isNullOrBlank()) {
                 _state.value = PlayerUiState.Error("Couldn't find an IMDb id for this title.")
                 return@launch
@@ -168,7 +205,7 @@ class PlayerViewModel(
                 is StreamResolution.Ready -> {
                     playingUrl = result.url
                     playingHash = ""
-                    _state.value = PlayerUiState.Ready(result.url, title.ifBlank { result.label }, startMs, tunneling, subs, subScale, subStyle, engine, prefs, hasNext)
+                    goReady(result.url, title.ifBlank { result.label })
                 }
                 is StreamResolution.Failure ->
                     _state.value = PlayerUiState.Error(result.message)

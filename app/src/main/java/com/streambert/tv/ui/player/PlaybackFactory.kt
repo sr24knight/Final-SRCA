@@ -14,6 +14,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import com.streambert.tv.data.stream.SubtitleTrack
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 
 /**
  * Builds an [ExoPlayer] tuned for premium home-theatre playback:
@@ -36,6 +37,22 @@ import okhttp3.OkHttpClient
  * optional media3 FFmpeg decoder extension** (built from source) — see README.
  */
 object PlaybackFactory {
+
+    /**
+     * A single shared OkHttp client for *playback* (kept separate from the API
+     * clients in NetworkModule). Reusing one client across every player build
+     * means the connection pool stays warm — TLS handshakes and sockets to the
+     * debrid CDN can be reused instead of re-established on every play, which
+     * shaves time off the first byte. A short connect timeout also fails fast
+     * so we fall back quickly instead of hanging on a dead host.
+     */
+    private val playbackHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
 
     @UnstableApi
     fun create(
@@ -65,15 +82,23 @@ object PlaybackFactory {
             )
         }
 
-        // Start playback sooner: smaller "buffer for playback" thresholds so we
-        // begin rendering as soon as a little data is available instead of
-        // waiting for a large buffer (helps big 4K remuxes over the network).
+        // Start playback almost instantly. The 3rd/4th values are the important
+        // ones for *perceived* startup time: they are the amount of media that
+        // must be buffered before ExoPlayer begins (and resumes) rendering.
+        //   • bufferForPlaybackMs = 1_000  → begin rendering after just ~1s of
+        //     media is ready, instead of waiting for a big safety buffer.
+        //   • bufferForPlaybackAfterRebufferMs = 2_000 → resume quickly after a
+        //     stall without immediately re-stalling.
+        // The 1st/2nd values keep a healthy 15s..50s buffer in memory once we're
+        // rolling, and setPrioritizeTimeOverSizeThresholds(true) makes those
+        // thresholds time-based (not byte-based) so high-bitrate 4K remuxes
+        // still start fast.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs = */ 15_000,
-                /* maxBufferMs = */ 60_000,
-                /* bufferForPlaybackMs = */ 1_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 3_000
+                /* maxBufferMs = */ 50_000,
+                /* bufferForPlaybackMs = */ 1_000,
+                /* bufferForPlaybackAfterRebufferMs = */ 2_000
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -87,9 +112,8 @@ object PlaybackFactory {
         // auto-selects the right source for the content — progressive (MKV/MP4/WebM),
         // HLS (.m3u8), DASH (.mpd) or SmoothStreaming — because those modules are on the
         // classpath. This is what gives us broad container/streaming coverage.
-        val httpDataSourceFactory = OkHttpDataSource.Factory(
-            OkHttpClient.Builder().build()
-        ).setUserAgent("StreambertTV")
+        val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient)
+            .setUserAgent("StreambertTV")
 
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
