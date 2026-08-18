@@ -3,6 +3,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required by ExoPlayer's setWakeMode(WAKE_MODE_NETWORK): lets the player
+         hold a CPU + Wi-Fi lock during network playback so TV boxes don't let
+         Wi-Fi power-save starve/stall the stream. Without this the player throws
+         when it tries to acquire the wake lock as playback starts. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Google TV / Android TV compatibility. touchscreen is not required so the
          app installs on all TV devices. leanback is declared but NOT required, so
