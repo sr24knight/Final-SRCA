@@ -65,7 +65,7 @@ fun LandscapeCard(
             focusedBorder = Border(BorderStroke(3.dp, MaterialTheme.colorScheme.primary))
         ),
         modifier = modifier
-            .width(208.dp)
+            .width(184.dp)
             .aspectRatio(16f / 9f)
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .cardLongPress(onLongPress)
