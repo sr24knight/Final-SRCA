@@ -49,6 +49,15 @@ android {
         buildConfigField("String", "TMDB_DEFAULT_TOKEN", "\"$tmdbDefaultToken\"")
         buildConfigField("String", "MDBLIST_DEFAULT_KEY", "\"$mdblistDefaultKey\"")
         buildConfigField("String", "GEMINI_DEFAULT_KEY", "\"$geminiDefaultKey\"")
+
+        // Ship native libraries (mainly libmpv) ONLY for the CPU architectures
+        // real Android TV / Google TV devices use. Dropping x86/x86_64 — which
+        // essentially only exist on emulators — roughly halves the bundled .so
+        // payload and shrinks the APK noticeably. (ExoPlayer, the default engine,
+        // needs no native libs, so ARM-only never affects normal playback.)
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
@@ -138,8 +147,6 @@ dependencies {
     implementation("io.coil-kt:coil-gif:2.7.0")
     implementation("io.coil-kt:coil-svg:2.7.0")
 
-    // In-app YouTube trailer player
-    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:12.1.1")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
 
     // Settings persistence
