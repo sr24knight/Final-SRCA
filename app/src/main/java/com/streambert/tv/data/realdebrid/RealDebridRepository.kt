@@ -21,12 +21,21 @@ class RealDebridRepository(
     private val settings: SettingsRepository
 ) {
 
-    /** Build a magnet from an info hash and resolve it to a playable URL. */
+    /**
+     * Build a magnet from an info hash and resolve it to a playable URL.
+     *
+     * [instantOnly] = true (auto-resolve path) only waits a short window for RD
+     * to report the release already `downloaded` (cached); if it isn't, it
+     * fails fast so the caller can try the next cached source instead of
+     * blocking on a download. An explicit pick passes false and gets the full
+     * wait window.
+     */
     suspend fun resolveHash(
         hash: String,
         name: String,
         season: Int? = null,
-        episode: Int? = null
+        episode: Int? = null,
+        instantOnly: Boolean = false
     ): StreamResolution {
         val key = settings.currentRealDebridKey().trim()
         if (key.isBlank()) {
@@ -60,11 +69,16 @@ class RealDebridRepository(
             }
 
             // 3) Wait for RD to have the file ready (instant if already cached).
-            val ready = awaitDownloaded(auth, torrentId)
-                ?: return StreamResolution.Failure(
-                    "Source isn't cached on Real-Debrid yet and is still downloading. " +
-                        "Try another source or play again shortly."
-                )
+            val ready = awaitDownloaded(
+                auth,
+                torrentId,
+                maxPolls = if (instantOnly) FAST_POLLS else MAX_POLLS,
+                intervalMs = if (instantOnly) FAST_POLL_INTERVAL_MS else POLL_INTERVAL_MS
+            ) ?: return StreamResolution.Failure(
+                if (instantOnly) "NOT_CACHED: not instantly available on Real-Debrid."
+                else "Source isn't cached on Real-Debrid yet and is still downloading. " +
+                    "Try another source or play again shortly."
+            )
             val link = ready.links.firstOrNull { it.isNotBlank() }
                 ?: return StreamResolution.Failure("Real-Debrid returned no download link.")
 
@@ -85,14 +99,19 @@ class RealDebridRepository(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
-    private suspend fun awaitDownloaded(auth: String, torrentId: String): RdTorrentInfo? {
-        repeat(MAX_POLLS) { attempt ->
+    private suspend fun awaitDownloaded(
+        auth: String,
+        torrentId: String,
+        maxPolls: Int = MAX_POLLS,
+        intervalMs: Long = POLL_INTERVAL_MS
+    ): RdTorrentInfo? {
+        repeat(maxPolls) { attempt ->
             val info = runCatching { api.getTorrentInfo(auth, torrentId).body() }.getOrNull()
             if (info != null &&
                 info.status.equals("downloaded", ignoreCase = true) &&
                 info.links.any { it.isNotBlank() }
             ) return info
-            if (attempt < MAX_POLLS - 1) delay(POLL_INTERVAL_MS)
+            if (attempt < maxPolls - 1) delay(intervalMs)
         }
         return null
     }
@@ -129,6 +148,10 @@ class RealDebridRepository(
     companion object {
         private const val MAX_POLLS = 8
         private const val POLL_INTERVAL_MS = 1500L
+        // Instant-only (auto path): a short window is enough for RD to report a
+        // cached release as `downloaded`; anything longer is a real download.
+        private const val FAST_POLLS = 3
+        private const val FAST_POLL_INTERVAL_MS = 700L
         private val VIDEO_EXTS = listOf(".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts")
         private val DEFAULT_TRACKERS = listOf(
             "udp://tracker.opentrackr.org:1337/announce",

@@ -405,7 +405,23 @@ class SettingsRepository(private val context: Context) {
                     base.contains("torrentio", true) -> "Torrentio"
                     else -> "Scraper"
                 }
-                AddonSource(base, isTorBox = true, resolveViaTorBox = true, label = label)
+                // If the add-on already has a debrid configured (e.g. a
+                // Torrentio "realdebrid=…"/"torbox=…" URL, or a Comet config
+                // that names a debrid service), it returns directly-playable
+                // URLs and its OWN cached markers. Treat it as a DIRECT source
+                // so we use those URLs + markers instead of discarding them and
+                // re-resolving every release by hash. Only fall back to
+                // hash-resolution for a true no-debrid scraper.
+                when (val debrid = detectAddonDebrid(base)) {
+                    null -> AddonSource(base, isTorBox = true, resolveViaTorBox = true, label = label)
+                    else -> AddonSource(
+                        base,
+                        isTorBox = debrid == DEBRID_TORBOX,
+                        resolveViaTorBox = false,
+                        label = label,
+                        debrid = debrid
+                    )
+                }
             }
             .toList()
 
@@ -415,6 +431,56 @@ class SettingsRepository(private val context: Context) {
         return u.contains("opensubtitle") || u.contains("subtitle") || u.contains("subdl") ||
             u.contains("subsource") || u.contains("wyzie") ||
             u.contains("subsense") || u.contains("nepiraw")
+    }
+
+    /**
+     * Detects whether an add-on URL has a debrid service baked in — meaning it
+     * returns directly-playable URLs (and its own cached markers) rather than
+     * raw torrent hashes. Returns [DEBRID_TORBOX] / [DEBRID_RD] when confident,
+     * or null for a no-debrid scraper (the safe default → hash-resolution).
+     *
+     * Conservative on purpose: a false "direct" would make the source return
+     * zero playable options (its hash-only streams get filtered out), so we
+     * only flag it when the config is unambiguous.
+     */
+    private fun detectAddonDebrid(url: String): String? {
+        val u = url.lowercase()
+        // Torrentio-style query segments are unambiguous.
+        if (Regex("(^|[/=&?])torbox=").containsMatchIn(u)) return DEBRID_TORBOX
+        if (Regex("(^|[/=&?])(realdebrid|real-debrid)=").containsMatchIn(u)) return DEBRID_RD
+
+        // Comet / MediaFusion & friends encode their config as a base64 blob in
+        // a path segment. Decode it and read the selected debrid service(s).
+        val cfg = u + " " + decodeConfigBlobs(url)
+        val services = Regex("\"debridservices\"\\s*:\\s*\\[([^\\]]*)\\]").find(cfg)?.groupValues?.get(1)
+        if (!services.isNullOrBlank()) {
+            if (services.contains("torbox") && !services.contains("realdebrid")) return DEBRID_TORBOX
+            if (services.contains("realdebrid") || services.contains("real-debrid")) return DEBRID_RD
+        }
+        return null
+    }
+
+    /**
+     * Best-effort decode of base64(url) path/query segments in an add-on URL so
+     * [detectAddonDebrid] can read an embedded JSON config. Non-base64 or binary
+     * segments are ignored; only text that looks like config is kept.
+     */
+    private fun decodeConfigBlobs(url: String): String {
+        val out = StringBuilder()
+        url.split('/', '?', '&', '=').forEach { seg ->
+            val s = seg.trim().removeSuffix("manifest.json").trim('/')
+            if (s.length < 16) return@forEach
+            runCatching {
+                // base64url in URLs usually drops the '=' padding — restore it.
+                val padded = s + "=".repeat((4 - s.length % 4) % 4)
+                val bytes = android.util.Base64.decode(padded, android.util.Base64.URL_SAFE)
+                val text = String(bytes, Charsets.UTF_8)
+                if (text.contains("{") || text.contains("debrid", true)) {
+                    out.append(text.lowercase()).append(' ')
+                }
+            }
+        }
+        return out.toString()
     }
 
     /** Normalized base URLs of every installed add-on — subtitle add-ons are queried from this same list. */

@@ -35,17 +35,41 @@ class StreamRepository(
             )
         }
         onProgress("Finding an instant source…")
-        val best = runCatching { buildOptions(imdbId, season, episode) }.getOrNull()?.firstOrNull()
-            ?: return StreamResolution.Failure(
+        val options = runCatching { buildOptions(imdbId, season, episode) }.getOrNull().orEmpty()
+        if (options.isEmpty()) {
+            return StreamResolution.Failure(
                 "No cached sources found yet. Try another title/quality or play again shortly."
             )
-        // Direct (debrid) sources already have a URL; scraper sources resolve now.
-        best.url?.let { return StreamResolution.Ready(it, best.label) }
-        best.hash?.let {
-            onProgress("Preparing instant debrid stream…")
-            return resolveViaDebrid(it, best.label, season, episode, best.debrid)
         }
-        return StreamResolution.Failure("Selected source has no URL or hash.")
+
+        // Auto-resolve is instant-only: walk the ranked (cached-first) list and
+        // resolve each candidate with no download wait. The first one that's
+        // actually cached plays; a source that turns out not to be cached fails
+        // fast and we roll straight to the next — so the auto path never stalls
+        // on a download. (Explicitly picking a source from the list still
+        // downloads-and-waits, via resolveHash → resolveViaDebrid instantOnly=false.)
+        var attempts = 0
+        var lastFailure: String? = null
+        for (opt in options) {
+            // Debrid-backed sources already carry a resolved URL — play now.
+            opt.url?.let { return StreamResolution.Ready(it, opt.label) }
+            val hash = opt.hash ?: continue
+            if (attempts >= MAX_INSTANT_ATTEMPTS) break
+            attempts++
+            onProgress(
+                if (attempts == 1) "Preparing instant debrid stream…"
+                else "Trying the next cached source…"
+            )
+            when (val r = resolveViaDebrid(hash, opt.label, season, episode, opt.debrid, instantOnly = true)) {
+                is StreamResolution.Ready -> return r
+                is StreamResolution.Failure -> lastFailure = r.message
+                is StreamResolution.Progress -> { /* keep trying the next source */ }
+            }
+        }
+        return StreamResolution.Failure(
+            lastFailure?.takeUnless { it.startsWith("NOT_CACHED") }
+                ?: "No cached sources are ready right now. Open the source list to pick one to download, or try another quality/title."
+        )
     }
 
     /**
@@ -71,28 +95,35 @@ class StreamRepository(
         title: String,
         season: Int?,
         episode: Int?,
-        debrid: String? = null
+        debrid: String? = null,
+        instantOnly: Boolean = false
     ): StreamResolution {
         val hasTorBox = settings.currentTorboxKey().isNotBlank()
         val hasRealDebrid = settings.currentRealDebridKey().isNotBlank()
         // Honour an explicit picker choice — play through exactly that service.
         when (debrid) {
             SettingsRepository.DEBRID_TORBOX ->
-                if (hasTorBox) return torbox.resolveHash(hash, title, season, episode)
+                if (hasTorBox) return torbox.resolveHash(hash, title, season, episode, instantOnly)
             SettingsRepository.DEBRID_RD ->
-                if (hasRealDebrid) return realDebrid.resolveHash(hash, title, season, episode)
+                if (hasRealDebrid) return realDebrid.resolveHash(hash, title, season, episode, instantOnly)
         }
         // Auto / fallback: TorBox first (fast instant check + CDN), then RD.
         if (hasTorBox) {
-            val result = torbox.resolveHash(hash, title, season, episode)
+            val result = torbox.resolveHash(hash, title, season, episode, instantOnly)
             if (result is StreamResolution.Ready || !hasRealDebrid) return result
         }
         if (hasRealDebrid) {
-            return realDebrid.resolveHash(hash, title, season, episode)
+            return realDebrid.resolveHash(hash, title, season, episode, instantOnly)
         }
         return StreamResolution.Failure(
             "No debrid configured. Add a TorBox or Real-Debrid key in Settings."
         )
+    }
+
+    private companion object {
+        // How many cached candidates the auto path will try (fail-fast each)
+        // before giving up. Bounds worst-case time when instant flags are stale.
+        const val MAX_INSTANT_ATTEMPTS = 4
     }
 
     /** All playable streams, instant-first then by quality, for the picker. */
@@ -165,10 +196,10 @@ class StreamRepository(
                     // Scraper hash source — offer it through EACH connected debrid
                     // so TorBox and Real-Debrid show up as separate options.
                     if (hasTorBox) all.add(option(SettingsRepository.DEBRID_TORBOX, hash != null && hash in cached))
-                    if (hasRealDebrid) all.add(option(SettingsRepository.DEBRID_RD, markerCached(s)))
+                    if (hasRealDebrid) all.add(option(SettingsRepository.DEBRID_RD, markerCached(s, SettingsRepository.DEBRID_RD)))
                 } else {
                     // Direct URL already resolved by a specific debrid service.
-                    val instant = if (src.isTorBox) (hash != null && hash in cached) else markerCached(s)
+                    val instant = if (src.isTorBox) (hash != null && hash in cached) else markerCached(s, src.debrid)
                     all.add(option(src.debrid, instant))
                 }
             }
@@ -191,11 +222,41 @@ class StreamRepository(
         return m?.value?.lowercase(Locale.ROOT)
     }
 
-    private fun markerCached(stream: StremioStream): Boolean {
-        val text = "${stream.name.orEmpty()} ${stream.title.orEmpty()}".lowercase(Locale.ROOT)
-        return stream.name?.contains("+") == true ||
-            stream.name?.contains("⚡") == true ||
-            text.contains("cached")
+    /**
+     * Best-effort read of an addon's OWN "already cached" marker, for [debrid].
+     *
+     * Real-Debrid has no bulk instant-availability API anymore, so for RD the
+     * only cache signal is what the addon writes into the release text:
+     *   • Torrentio tags cached releases with a debrid code + plus, e.g.
+     *     "[RD+]" / "[AD+]" / "[TB+]", and un-cached ones with "[RD download]".
+     *   • Comet / MediaFusion use a "⚡" bolt; some write "cached"/"instant".
+     *
+     * This is only a hint for ORDERING + badges — the authoritative check is
+     * the instant-only resolve at play time. It must be:
+     *   • Precise: a stray "+" (DDP5.1+, HDR10+, H.264+) must NOT count.
+     *   • Provider-aware: an RD option must not inherit a "[TB+]" TorBox tag.
+     *   • Honest about negatives: "[RD download]" / "uncached" means NOT cached.
+     *
+     * [debrid] = null accepts any known provider marker.
+     */
+    private fun markerCached(stream: StremioStream, debrid: String? = null): Boolean {
+        val text = "${stream.name.orEmpty()} ${stream.title.orEmpty()} ${stream.description.orEmpty()}"
+            .lowercase(Locale.ROOT)
+        if (text.isBlank()) return false
+        // Explicit "not cached" signals win outright — trust the addon.
+        if (Regex("uncached|not cached|\\b(download|downloading|queued)\\b").containsMatchIn(text)) {
+            return false
+        }
+        // Provider-specific "[rd+]" / "rd +" style cached tag. \b before the
+        // code stops "hard+" matching "rd+" and keeps a stray "+" from counting.
+        val codes = when (debrid) {
+            SettingsRepository.DEBRID_RD -> listOf("rd", "real-debrid", "realdebrid")
+            SettingsRepository.DEBRID_TORBOX -> listOf("tb", "torbox")
+            else -> listOf("rd", "tb", "ad", "pm", "dl", "oc", "real-debrid", "realdebrid", "torbox")
+        }
+        if (codes.any { Regex("\\b$it\\s*\\+").containsMatchIn(text) }) return true
+        // Generic instant markers (Comet / MediaFusion "⚡", or the words).
+        return text.contains("⚡") || Regex("\\b(cached|instant)\\b").containsMatchIn(text)
     }
 
     /**
