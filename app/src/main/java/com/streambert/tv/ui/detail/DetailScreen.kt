@@ -129,7 +129,22 @@ fun DetailScreen(
                 Header(
                     state = state,
                     watched = headerWatched,
-                    onPlay = { onPlayAuto(targetSeason(), targetEpisode(), targetTitle(), poster, backdrop) },
+                    onPlay = {
+                        // Fast path (Debrify-style): the Detail page has ALREADY
+                        // scraped + ranked + cache-checked the sources for this
+                        // target (top = best cached). Hand that straight to the
+                        // player so it skips re-scraping and jumps to resolving
+                        // just that one source. Only when the list is ready for
+                        // the current target; otherwise fall back to a full
+                        // auto-resolve.
+                        val best = state.sources.firstOrNull()
+                            ?.takeIf { !state.sourcesLoading && (!it.url.isNullOrBlank() || !it.hash.isNullOrBlank()) }
+                        if (best != null) {
+                            onPlayStream(targetTitle(), best.url.orEmpty(), best.hash.orEmpty(), poster, backdrop, best.debrid.orEmpty())
+                        } else {
+                            onPlayAuto(targetSeason(), targetEpisode(), targetTitle(), poster, backdrop)
+                        }
+                    },
                     onSources = { showSources = true },
                     onTrailer = state.trailerKey?.let { { onOpenTrailer(state.trailerKeys.joinToString(",")) } },
                     onToggleWatched = viewModel::toggleWatched,
