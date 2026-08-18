@@ -99,7 +99,9 @@ fun AppNavigation(
                             trakt = container.traktRepository,
                             traktAuth = container.traktAuthRepository,
                             ai = container.aiCatalog,
-                            mdblist = container.mdbListRepository
+                            mdblist = container.mdbListRepository,
+                            youTubeExtractor = container.youTubeExtractor,
+                            settings = container.settingsRepository
                         )
                     }
                 }

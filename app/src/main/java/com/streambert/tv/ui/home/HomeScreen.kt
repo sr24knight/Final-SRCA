@@ -127,7 +127,8 @@ fun HomeScreen(
                     onToggleMyList = viewModel::toggleMyList,
                     onMarkWatched = viewModel::markWatched,
                     onMarkUnwatched = viewModel::markUnwatched,
-                    onHeroChanged = viewModel::loadHeroExtra
+                    onHeroChanged = viewModel::loadHeroExtra,
+                    onRequestTrailer = viewModel::loadHeroTrailer
                 )
                 // Transparent nav bar overlaid on the full-bleed hero (the hero's
                 // top scrim + the title's top offset keep everything legible).
@@ -156,7 +157,8 @@ private fun BrowseContent(
     onToggleMyList: (CatalogItem) -> Unit,
     onMarkWatched: (CatalogItem) -> Unit,
     onMarkUnwatched: (CatalogItem) -> Unit,
-    onHeroChanged: (CatalogItem) -> Unit
+    onHeroChanged: (CatalogItem) -> Unit,
+    onRequestTrailer: (CatalogItem) -> Unit
 ) {
     val rows: List<CatalogRow> = when (tab) {
         HomeTab.SHOWS -> state.showsRows
@@ -198,6 +200,23 @@ private fun BrowseContent(
         onHeroChanged(h)
     }
 
+    // Autoplay a muted trailer preview on the hero for the SELECTED (focused)
+    // title. Deliberately only fires when the user has focused a card — not
+    // during the idle billboard rotation — and after a short dwell so quickly
+    // scrubbing through cards doesn't spin up trailers. Re-keying on the hero
+    // item + focus resets the timer and (via HomeHero) tears down the previous
+    // player when focus moves; returning to a title replays it from cache.
+    var trailerReady by remember(tab) { mutableStateOf(false) }
+    LaunchedEffect(heroItem?.id, heroItem?.type, focused != null) {
+        trailerReady = false
+        val h = heroItem ?: return@LaunchedEffect
+        if (focused == null) return@LaunchedEffect
+        delay(2_500)
+        onRequestTrailer(h)
+        trailerReady = true
+    }
+    val heroTrailer = heroItem?.let { state.heroTrailers["${it.type}_${it.id}"] }
+
     // Netflix-style "TOP 10 · #N in {Shows|Movies}" badge when the focused title is
     // in one of the ranked (Top 10) rows.
     val topTenRank: Int? = heroItem?.let { h ->
@@ -236,6 +255,8 @@ private fun BrowseContent(
         HomeHero(
             item = heroItem,
             extra = heroItem?.let { state.heroExtras["${it.type}_${it.id}"] },
+            trailer = heroTrailer,
+            playTrailer = trailerReady,
             modifier = Modifier.fillMaxSize(),
             bottomReserved = rowsViewportHeight,
             heroVisibleHeight = heroVisibleHeight

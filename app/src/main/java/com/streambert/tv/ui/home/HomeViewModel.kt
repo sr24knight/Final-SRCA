@@ -44,6 +44,12 @@ data class HomeUiState(
     val serviceLogos: Map<Int, String> = emptyMap(),
     /** Lazily-fetched extra hero metadata, keyed by "type_id". */
     val heroExtras: Map<String, HeroExtra> = emptyMap(),
+    /**
+     * Lazily-resolved hero trailer streams, keyed by "type_id". A present key
+     * with a null value means "resolved, but no trailer available" (so we don't
+     * keep re-fetching). Populated on demand for the focused hero title.
+     */
+    val heroTrailers: Map<String, com.streambert.tv.data.trailer.TrailerStream?> = emptyMap(),
     val error: String? = null
 )
 
@@ -64,7 +70,9 @@ class HomeViewModel(
     private val trakt: com.streambert.tv.data.trakt.TraktRepository,
     private val traktAuth: com.streambert.tv.data.trakt.TraktAuthRepository,
     private val ai: com.streambert.tv.data.gemini.AiCatalog,
-    private val mdblist: com.streambert.tv.data.mdblist.MDBListRepository
+    private val mdblist: com.streambert.tv.data.mdblist.MDBListRepository,
+    private val youTubeExtractor: com.streambert.tv.data.trailer.YouTubeExtractor,
+    private val settings: com.streambert.tv.data.settings.SettingsRepository
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(HomeUiState())
@@ -269,6 +277,31 @@ class HomeViewModel(
             }.getOrNull() ?: HeroExtra(imdbRating = imdb)
             _state.value = _state.value.copy(heroExtras = _state.value.heroExtras + (key to extra))
             heroExtraInFlight -= key
+        }
+    }
+
+    private val heroTrailerInFlight = mutableSetOf<String>()
+
+    /**
+     * Lazily resolves the focused hero title's YouTube trailer to a directly-
+     * playable stream (TMDB video keys → [youTubeExtractor]) so the hero can
+     * autoplay a muted preview. Cached in [HomeUiState.heroTrailers] (a stored
+     * null = "resolved, none") so re-focusing a title replays instantly and we
+     * never re-fetch. Honors the "use trailers" setting — when it's off, or the
+     * title has no trailer, the value resolves to null and no preview plays.
+     */
+    fun loadHeroTrailer(item: CatalogItem) {
+        val key = "${item.type}_${item.id}"
+        if (_state.value.heroTrailers.containsKey(key) || key in heroTrailerInFlight) return
+        heroTrailerInFlight += key
+        viewModelScope.launch {
+            val stream = runCatching {
+                if (!settings.currentTmdbUseTrailers()) return@runCatching null
+                val keys = repo.trailerYoutubeKeys(item.id, item.type)
+                if (keys.isEmpty()) null else youTubeExtractor.extractFirst(keys)
+            }.getOrNull()
+            _state.value = _state.value.copy(heroTrailers = _state.value.heroTrailers + (key to stream))
+            heroTrailerInFlight -= key
         }
     }
 
