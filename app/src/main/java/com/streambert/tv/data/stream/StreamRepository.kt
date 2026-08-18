@@ -196,10 +196,10 @@ class StreamRepository(
                     // Scraper hash source — offer it through EACH connected debrid
                     // so TorBox and Real-Debrid show up as separate options.
                     if (hasTorBox) all.add(option(SettingsRepository.DEBRID_TORBOX, hash != null && hash in cached))
-                    if (hasRealDebrid) all.add(option(SettingsRepository.DEBRID_RD, markerCached(s)))
+                    if (hasRealDebrid) all.add(option(SettingsRepository.DEBRID_RD, markerCached(s, SettingsRepository.DEBRID_RD)))
                 } else {
                     // Direct URL already resolved by a specific debrid service.
-                    val instant = if (src.isTorBox) (hash != null && hash in cached) else markerCached(s)
+                    val instant = if (src.isTorBox) (hash != null && hash in cached) else markerCached(s, src.debrid)
                     all.add(option(src.debrid, instant))
                 }
             }
@@ -222,11 +222,41 @@ class StreamRepository(
         return m?.value?.lowercase(Locale.ROOT)
     }
 
-    private fun markerCached(stream: StremioStream): Boolean {
-        val text = "${stream.name.orEmpty()} ${stream.title.orEmpty()}".lowercase(Locale.ROOT)
-        return stream.name?.contains("+") == true ||
-            stream.name?.contains("⚡") == true ||
-            text.contains("cached")
+    /**
+     * Best-effort read of an addon's OWN "already cached" marker, for [debrid].
+     *
+     * Real-Debrid has no bulk instant-availability API anymore, so for RD the
+     * only cache signal is what the addon writes into the release text:
+     *   • Torrentio tags cached releases with a debrid code + plus, e.g.
+     *     "[RD+]" / "[AD+]" / "[TB+]", and un-cached ones with "[RD download]".
+     *   • Comet / MediaFusion use a "⚡" bolt; some write "cached"/"instant".
+     *
+     * This is only a hint for ORDERING + badges — the authoritative check is
+     * the instant-only resolve at play time. It must be:
+     *   • Precise: a stray "+" (DDP5.1+, HDR10+, H.264+) must NOT count.
+     *   • Provider-aware: an RD option must not inherit a "[TB+]" TorBox tag.
+     *   • Honest about negatives: "[RD download]" / "uncached" means NOT cached.
+     *
+     * [debrid] = null accepts any known provider marker.
+     */
+    private fun markerCached(stream: StremioStream, debrid: String? = null): Boolean {
+        val text = "${stream.name.orEmpty()} ${stream.title.orEmpty()} ${stream.description.orEmpty()}"
+            .lowercase(Locale.ROOT)
+        if (text.isBlank()) return false
+        // Explicit "not cached" signals win outright — trust the addon.
+        if (Regex("uncached|not cached|\\b(download|downloading|queued)\\b").containsMatchIn(text)) {
+            return false
+        }
+        // Provider-specific "[rd+]" / "rd +" style cached tag. \b before the
+        // code stops "hard+" matching "rd+" and keeps a stray "+" from counting.
+        val codes = when (debrid) {
+            SettingsRepository.DEBRID_RD -> listOf("rd", "real-debrid", "realdebrid")
+            SettingsRepository.DEBRID_TORBOX -> listOf("tb", "torbox")
+            else -> listOf("rd", "tb", "ad", "pm", "dl", "oc", "real-debrid", "realdebrid", "torbox")
+        }
+        if (codes.any { Regex("\\b$it\\s*\\+").containsMatchIn(text) }) return true
+        // Generic instant markers (Comet / MediaFusion "⚡", or the words).
+        return text.contains("⚡") || Regex("\\b(cached|instant)\\b").containsMatchIn(text)
     }
 
     /**
