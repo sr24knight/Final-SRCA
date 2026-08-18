@@ -41,6 +41,12 @@ data class BrowseUiState(
     val title: String = "",
     val hero: CatalogItem? = null,
     val rows: List<CatalogRow> = emptyList(),
+    /**
+     * Optional explicit hero image (a full URL) that overrides the [hero]
+     * item's artwork — used by the person screen to show the cast member's own
+     * portrait photo as the backdrop. Null → fall back to [hero]'s backdrop.
+     */
+    val heroImageUrl: String? = null,
     val error: String? = null
 )
 
@@ -89,22 +95,36 @@ fun CatalogBrowseScreen(
 
 @Composable
 private fun Header(state: BrowseUiState, onBack: () -> Unit) {
+    // A person screen supplies heroImageUrl (a portrait 2:3 headshot); catalog
+    // screens fall back to the featured item's 16:9 backdrop.
+    val portrait = state.heroImageUrl != null
+    val heroModel = state.heroImageUrl ?: state.hero?.backdropUrl ?: state.hero?.posterUrl
     Box(
         Modifier
             .fillMaxWidth()
             .height(320.dp)
     ) {
         AsyncImage(
-            model = state.hero?.backdropUrl ?: state.hero?.posterUrl,
+            model = heroModel,
             contentDescription = null,
             contentScale = ContentScale.Crop,
+            // Person photos are portrait — anchor to the top so the face isn't
+            // cropped out of the wide hero; movie backdrops stay centered.
+            alignment = if (portrait) Alignment.TopCenter else Alignment.Center,
             modifier = Modifier.fillMaxSize()
         )
         Box(
             Modifier
                 .fillMaxSize()
                 .background(
-                    Brush.verticalGradient(
+                    // Lighter top for a person headshot (keep the face visible);
+                    // heavier top for movie backdrops. Both fade dark at the
+                    // bottom for the name.
+                    if (portrait) Brush.verticalGradient(
+                        0f to Color(0x330B0B0F),
+                        0.55f to Color(0x4D0B0B0F),
+                        1f to Color(0xF20B0B0F)
+                    ) else Brush.verticalGradient(
                         0f to Color(0xB30B0B0F),
                         0.5f to Color(0x660B0B0F),
                         1f to Color(0xF20B0B0F)
