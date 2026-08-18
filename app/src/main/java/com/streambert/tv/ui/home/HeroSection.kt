@@ -25,13 +25,29 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.streambert.tv.data.trailer.TrailerStream
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -403,7 +419,11 @@ fun HomeHero(
     extra: HeroExtra?,
     modifier: Modifier = Modifier,
     bottomReserved: Dp = 0.dp,
-    heroVisibleHeight: Dp = 0.dp
+    heroVisibleHeight: Dp = 0.dp,
+    /** Resolved trailer stream for [item] (null = none/not resolved yet). */
+    trailer: TrailerStream? = null,
+    /** When true and [trailer] is available, autoplay a muted preview. */
+    playTrailer: Boolean = false
 ) {
     val bg = Color(0xFF0B0B0F)
     // Nuvio "Modern" home hero: pinned to the top ~half of the screen with the
@@ -429,6 +449,27 @@ fun HomeHero(
                     else Modifier.fillMaxSize()
                 )
         )
+
+        // Autoplaying muted trailer preview for the selected title, laid directly
+        // over the still backdrop (same region + size). It crossfades in and is
+        // torn down (ExoPlayer released) whenever [playTrailer]/[trailer] change,
+        // so moving focus to another title cleanly stops it. The gradient scrims
+        // below render on top of this, keeping the title block legible.
+        AnimatedVisibility(
+            visible = playTrailer && trailer != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .fillMaxWidth()
+                .then(
+                    if (heroVisibleHeight > 0.dp) Modifier.height(heroVisibleHeight)
+                    else Modifier.fillMaxSize()
+                )
+        ) {
+            trailer?.let { HeroTrailerLayer(it) }
+        }
+
         // Left fade -> background (title legibility).
         Box(
             Modifier.fillMaxSize().background(
@@ -533,6 +574,58 @@ fun HomeHero(
             }
         }
     }
+}
+
+/**
+ * Muted, controller-less ExoPlayer that plays a resolved trailer [stream] inside
+ * the hero. Reuses the same lightweight ExoPlayer approach as the full-screen
+ * TrailerScreen (progressive, or merged video+audio for adaptive). The player is
+ * keyed on the stream URL so a new hero title rebuilds it, and it's released in
+ * onDispose when this leaves composition (hero change / navigation away).
+ */
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+private fun HeroTrailerLayer(stream: TrailerStream) {
+    val context = LocalContext.current
+    val exo = remember(stream.videoUrl) {
+        ExoPlayer.Builder(context).build().apply {
+            val dsf = DefaultDataSource.Factory(context)
+            val source = if (stream.audioUrl.isNullOrBlank()) {
+                ProgressiveMediaSource.Factory(dsf)
+                    .createMediaSource(MediaItem.fromUri(stream.videoUrl))
+            } else {
+                // Adaptive: merge the separate video + audio tracks.
+                MergingMediaSource(
+                    ProgressiveMediaSource.Factory(dsf).createMediaSource(MediaItem.fromUri(stream.videoUrl)),
+                    ProgressiveMediaSource.Factory(dsf).createMediaSource(MediaItem.fromUri(stream.audioUrl))
+                )
+            }
+            volume = 0f                       // muted preview
+            repeatMode = Player.REPEAT_MODE_OFF
+            setMediaSource(source)
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(stream.videoUrl) {
+        onDispose { exo.release() }
+    }
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                player = exo
+                useController = false
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                // Fill the hero area (crop) for a cinematic full-bleed preview.
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+        }
+    )
 }
 
 /** Focusable hero action button (Play = solid white, More info = translucent gray). */
