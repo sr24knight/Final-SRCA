@@ -35,17 +35,41 @@ class StreamRepository(
             )
         }
         onProgress("Finding an instant source…")
-        val best = runCatching { buildOptions(imdbId, season, episode) }.getOrNull()?.firstOrNull()
-            ?: return StreamResolution.Failure(
+        val options = runCatching { buildOptions(imdbId, season, episode) }.getOrNull().orEmpty()
+        if (options.isEmpty()) {
+            return StreamResolution.Failure(
                 "No cached sources found yet. Try another title/quality or play again shortly."
             )
-        // Direct (debrid) sources already have a URL; scraper sources resolve now.
-        best.url?.let { return StreamResolution.Ready(it, best.label) }
-        best.hash?.let {
-            onProgress("Preparing instant debrid stream…")
-            return resolveViaDebrid(it, best.label, season, episode, best.debrid)
         }
-        return StreamResolution.Failure("Selected source has no URL or hash.")
+
+        // Auto-resolve is instant-only: walk the ranked (cached-first) list and
+        // resolve each candidate with no download wait. The first one that's
+        // actually cached plays; a source that turns out not to be cached fails
+        // fast and we roll straight to the next — so the auto path never stalls
+        // on a download. (Explicitly picking a source from the list still
+        // downloads-and-waits, via resolveHash → resolveViaDebrid instantOnly=false.)
+        var attempts = 0
+        var lastFailure: String? = null
+        for (opt in options) {
+            // Debrid-backed sources already carry a resolved URL — play now.
+            opt.url?.let { return StreamResolution.Ready(it, opt.label) }
+            val hash = opt.hash ?: continue
+            if (attempts >= MAX_INSTANT_ATTEMPTS) break
+            attempts++
+            onProgress(
+                if (attempts == 1) "Preparing instant debrid stream…"
+                else "Trying the next cached source…"
+            )
+            when (val r = resolveViaDebrid(hash, opt.label, season, episode, opt.debrid, instantOnly = true)) {
+                is StreamResolution.Ready -> return r
+                is StreamResolution.Failure -> lastFailure = r.message
+                is StreamResolution.Progress -> { /* keep trying the next source */ }
+            }
+        }
+        return StreamResolution.Failure(
+            lastFailure?.takeUnless { it.startsWith("NOT_CACHED") }
+                ?: "No cached sources are ready right now. Open the source list to pick one to download, or try another quality/title."
+        )
     }
 
     /**
@@ -71,28 +95,35 @@ class StreamRepository(
         title: String,
         season: Int?,
         episode: Int?,
-        debrid: String? = null
+        debrid: String? = null,
+        instantOnly: Boolean = false
     ): StreamResolution {
         val hasTorBox = settings.currentTorboxKey().isNotBlank()
         val hasRealDebrid = settings.currentRealDebridKey().isNotBlank()
         // Honour an explicit picker choice — play through exactly that service.
         when (debrid) {
             SettingsRepository.DEBRID_TORBOX ->
-                if (hasTorBox) return torbox.resolveHash(hash, title, season, episode)
+                if (hasTorBox) return torbox.resolveHash(hash, title, season, episode, instantOnly)
             SettingsRepository.DEBRID_RD ->
-                if (hasRealDebrid) return realDebrid.resolveHash(hash, title, season, episode)
+                if (hasRealDebrid) return realDebrid.resolveHash(hash, title, season, episode, instantOnly)
         }
         // Auto / fallback: TorBox first (fast instant check + CDN), then RD.
         if (hasTorBox) {
-            val result = torbox.resolveHash(hash, title, season, episode)
+            val result = torbox.resolveHash(hash, title, season, episode, instantOnly)
             if (result is StreamResolution.Ready || !hasRealDebrid) return result
         }
         if (hasRealDebrid) {
-            return realDebrid.resolveHash(hash, title, season, episode)
+            return realDebrid.resolveHash(hash, title, season, episode, instantOnly)
         }
         return StreamResolution.Failure(
             "No debrid configured. Add a TorBox or Real-Debrid key in Settings."
         )
+    }
+
+    private companion object {
+        // How many cached candidates the auto path will try (fail-fast each)
+        // before giving up. Bounds worst-case time when instant flags are stale.
+        const val MAX_INSTANT_ATTEMPTS = 4
     }
 
     /** All playable streams, instant-first then by quality, for the picker. */

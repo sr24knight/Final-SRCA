@@ -32,19 +32,29 @@ class TorBoxRepository(
         }
     }
 
-    /** Build a magnet from an info hash and resolve it to a playable URL. */
+    /**
+     * Build a magnet from an info hash and resolve it to a playable URL.
+     *
+     * [instantOnly] = true means "cached or nothing": if TorBox doesn't already
+     * have the release, fail fast so the caller can roll to the next cached
+     * source instead of waiting on a download. This backs the auto-resolve
+     * path. An explicit pick from the source list passes false, keeping the
+     * download-and-wait fallback.
+     */
     suspend fun resolveHash(
         hash: String,
         name: String,
         season: Int? = null,
-        episode: Int? = null
-    ): StreamResolution = resolveMagnet(magnetFromHash(hash, name), season, episode)
+        episode: Int? = null,
+        instantOnly: Boolean = false
+    ): StreamResolution = resolveMagnet(magnetFromHash(hash, name), season, episode, instantOnly)
 
     /** Add a magnet to TorBox and resolve it to a direct stream URL. */
     suspend fun resolveMagnet(
         magnet: String,
         season: Int? = null,
-        episode: Int? = null
+        episode: Int? = null,
+        instantOnly: Boolean = false
     ): StreamResolution {
         val token = settings.currentTorboxKey()
         if (token.isBlank()) {
@@ -54,9 +64,7 @@ class TorBoxRepository(
         // Fast path (Debrify-style): ask TorBox to add the magnet ONLY if it's
         // already cached. A cached release comes back instantly with a ready
         // torrent id and its files are immediately listable, so playback starts
-        // right away with no download-poll wait. If it isn't cached, TorBox
-        // returns an error and we fall back to the normal add+poll flow below
-        // (so explicitly-chosen uncached sources still download and play).
+        // right away with no download-poll wait.
         val instant = try {
             api.createTorrent(
                 magnet = part("magnet", magnet),
@@ -70,10 +78,16 @@ class TorBoxRepository(
         val instantId = instant?.data?.torrentId ?: instant?.data?.queuedId
 
         val torrentId: Long
+        val cachedFast: Boolean
         if (instant?.success == true && instantId != null) {
             torrentId = instantId
+            cachedFast = true
+        } else if (instantOnly) {
+            // Auto path: don't wait on a download — let the caller try the next
+            // cached source. Marked NOT_CACHED so callers can recognise it.
+            return StreamResolution.Failure("NOT_CACHED: not instantly available on TorBox.")
         } else {
-            // Not cached (or the fast add errored) — add it for real and wait.
+            // Explicit pick of an uncached source — add it for real and wait.
             val created = try {
                 api.createTorrent(
                     magnet = part("magnet", magnet),
@@ -88,12 +102,19 @@ class TorBoxRepository(
                 ?: return StreamResolution.Failure(
                     created.detail ?: created.error ?: "TorBox did not return a torrent id."
                 )
+            cachedFast = false
         }
 
-        val torrent = awaitFiles(torrentId)
-            ?: return StreamResolution.Failure(
-                "Source isn't cached yet and is still downloading. Try another source or play again shortly."
-            )
+        // Cached torrents list their files immediately, so only give them a
+        // short budget; genuine downloads get the full poll window.
+        val torrent = awaitFiles(
+            torrentId,
+            maxPolls = if (cachedFast) FAST_POLLS else MAX_POLLS,
+            intervalMs = if (cachedFast) FAST_POLL_INTERVAL_MS else POLL_INTERVAL_MS
+        ) ?: return StreamResolution.Failure(
+            if (cachedFast) "TorBox reported the source cached but didn't return its files."
+            else "Source isn't cached yet and is still downloading. Try another source or play again shortly."
+        )
 
         val file = pickBestFile(torrent.files, season, episode)
             ?: return StreamResolution.Failure("No playable video file in the source.")
@@ -109,13 +130,17 @@ class TorBoxRepository(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
-    private suspend fun awaitFiles(torrentId: Long): TorBoxTorrent? {
-        repeat(MAX_POLLS) { attempt ->
+    private suspend fun awaitFiles(
+        torrentId: Long,
+        maxPolls: Int = MAX_POLLS,
+        intervalMs: Long = POLL_INTERVAL_MS
+    ): TorBoxTorrent? {
+        repeat(maxPolls) { attempt ->
             val torrent = runCatching { api.getTorrent(torrentId).data }.getOrNull()
             if (torrent != null && torrent.files.isNotEmpty() &&
                 (torrent.downloadPresent || torrent.downloadFinished || torrent.cached || torrent.files.isNotEmpty())
             ) return torrent
-            if (attempt < MAX_POLLS - 1) delay(POLL_INTERVAL_MS)
+            if (attempt < maxPolls - 1) delay(intervalMs)
         }
         return null
     }
@@ -155,6 +180,10 @@ class TorBoxRepository(
     companion object {
         private const val MAX_POLLS = 8
         private const val POLL_INTERVAL_MS = 1500L
+        // Cached torrents should list files on the first probe; a couple of
+        // short retries just absorb TorBox listing lag.
+        private const val FAST_POLLS = 3
+        private const val FAST_POLL_INTERVAL_MS = 500L
         private val VIDEO_EXTS = listOf(".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts")
         private val DEFAULT_TRACKERS = listOf(
             "udp://tracker.opentrackr.org:1337/announce",
