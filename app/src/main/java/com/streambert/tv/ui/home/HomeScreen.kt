@@ -243,11 +243,11 @@ private fun BrowseContent(
         }
     }
 
-    // Nuvio "Modern" home: the hero backdrop occupies the top ~56% of the screen
-    // (shown in full) and the content rows fill the bottom ~44% (they scroll
+    // Nuvio "Modern" home: the hero backdrop occupies the top ~60% of the screen
+    // (shown in full) and the content rows fill the bottom ~40% (they scroll
     // within their own viewport; the hero stays put and reflects the focused row).
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
-    val rowsViewportHeight = screenHeight * 0.44f
+    val rowsViewportHeight = screenHeight * 0.40f
     val heroVisibleHeight = screenHeight - rowsViewportHeight
     Box(Modifier.fillMaxSize()) {
         // Pinned hero — reflects the currently focused row item (no buttons; focus
