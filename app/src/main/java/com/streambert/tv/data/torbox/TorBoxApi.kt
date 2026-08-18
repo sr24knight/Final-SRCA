@@ -27,7 +27,12 @@ interface TorBoxApi {
     suspend fun createTorrent(
         @Part magnet: MultipartBody.Part,
         @Part seed: MultipartBody.Part,
-        @Part allowZip: MultipartBody.Part
+        @Part allowZip: MultipartBody.Part,
+        // When true, TorBox only adds the magnet if it is ALREADY cached and
+        // returns immediately (no download wait). If it isn't cached it fails
+        // fast with an error instead of queuing a download — which lets us skip
+        // the poll-and-wait loop entirely for the common instant-play case.
+        @Part addOnlyIfCached: MultipartBody.Part
     ): TorBoxEnvelope<CreateTorrentData>
 
     /** Single torrent with its files. */

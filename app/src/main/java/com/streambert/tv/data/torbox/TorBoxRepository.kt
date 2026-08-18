@@ -51,20 +51,44 @@ class TorBoxRepository(
             return StreamResolution.Failure("No TorBox API key set. Add it in Settings to enable playback.")
         }
 
-        val created = try {
+        // Fast path (Debrify-style): ask TorBox to add the magnet ONLY if it's
+        // already cached. A cached release comes back instantly with a ready
+        // torrent id and its files are immediately listable, so playback starts
+        // right away with no download-poll wait. If it isn't cached, TorBox
+        // returns an error and we fall back to the normal add+poll flow below
+        // (so explicitly-chosen uncached sources still download and play).
+        val instant = try {
             api.createTorrent(
                 magnet = part("magnet", magnet),
                 seed = part("seed", "1"),
-                allowZip = part("allow_zip", "false")
+                allowZip = part("allow_zip", "false"),
+                addOnlyIfCached = part("add_only_if_cached", "true")
             )
         } catch (e: Exception) {
-            return StreamResolution.Failure("Failed to add source: ${e.message}")
+            null
         }
+        val instantId = instant?.data?.torrentId ?: instant?.data?.queuedId
 
-        val torrentId = created.data?.torrentId ?: created.data?.queuedId
-            ?: return StreamResolution.Failure(
-                created.detail ?: created.error ?: "TorBox did not return a torrent id."
-            )
+        val torrentId: Long
+        if (instant?.success == true && instantId != null) {
+            torrentId = instantId
+        } else {
+            // Not cached (or the fast add errored) — add it for real and wait.
+            val created = try {
+                api.createTorrent(
+                    magnet = part("magnet", magnet),
+                    seed = part("seed", "1"),
+                    allowZip = part("allow_zip", "false"),
+                    addOnlyIfCached = part("add_only_if_cached", "false")
+                )
+            } catch (e: Exception) {
+                return StreamResolution.Failure("Failed to add source: ${e.message}")
+            }
+            torrentId = created.data?.torrentId ?: created.data?.queuedId
+                ?: return StreamResolution.Failure(
+                    created.detail ?: created.error ?: "TorBox did not return a torrent id."
+                )
+        }
 
         val torrent = awaitFiles(torrentId)
             ?: return StreamResolution.Failure(

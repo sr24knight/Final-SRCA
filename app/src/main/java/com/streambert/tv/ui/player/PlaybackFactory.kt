@@ -38,6 +38,11 @@ import java.util.concurrent.TimeUnit
  */
 object PlaybackFactory {
 
+    /** Desktop-Chrome UA presented to debrid CDNs / addons for the media fetch. */
+    private const val BROWSER_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
     /**
      * A single shared OkHttp client for *playback* (kept separate from the API
      * clients in NetworkModule). Reusing one client across every player build
@@ -112,8 +117,14 @@ object PlaybackFactory {
         // auto-selects the right source for the content — progressive (MKV/MP4/WebM),
         // HLS (.m3u8), DASH (.mpd) or SmoothStreaming — because those modules are on the
         // classpath. This is what gives us broad container/streaming coverage.
+        //
+        // Present a real desktop-browser User-Agent (not "StreambertTV"): some
+        // debrid CDNs and Stremio addons rate-limit, redirect differently, or
+        // stall the first byte for unknown UAs, which shows up as a slow start.
+        // OkHttp already follows cross-protocol (https↔http) redirects by
+        // default, so debrid links that 302 to a plain-http CDN still work.
         val httpDataSourceFactory = OkHttpDataSource.Factory(playbackHttpClient)
-            .setUserAgent("StreambertTV")
+            .setUserAgent(BROWSER_USER_AGENT)
 
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
@@ -122,8 +133,17 @@ object PlaybackFactory {
             .setTrackSelector(trackSelector)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
+            // Pause when headphones/HDMI audio is yanked instead of blasting the
+            // TV speakers.
+            .setHandleAudioBecomingNoisy(true)
             .build()
             .apply {
+                // Hold a Wi-Fi/CPU lock while streaming. Many Android TV boxes
+                // aggressively power-save the Wi-Fi radio, which starves the
+                // initial buffer fill and makes playback take seconds to start
+                // (or stutter right after it does). This is one of the biggest
+                // real-world "slow to start" causes on TV hardware.
+                setWakeMode(C.WAKE_MODE_NETWORK)
                 // handleAudioFocus = true so we duck/pause correctly.
                 setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
 
