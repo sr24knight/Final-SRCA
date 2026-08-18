@@ -26,8 +26,10 @@ class PersonViewModel(
         _state.value = BrowseUiState(loading = true, title = personName)
         viewModelScope.launch {
             try {
-                // Prefer the freshly-fetched name; fall back to the one passed in nav.
-                val name = repo.personName(personId).ifBlank { personName }
+                // Fetch the person's name + profile photo (single call), then
+                // their filmography. Prefer the fetched name; fall back to nav.
+                val (fetchedName, profileUrl) = repo.personHeader(personId)
+                val name = fetchedName.ifBlank { personName }
                 val filmography = repo.personFilmography(personId)
                 val movies = filmography.filter { it.type == com.streambert.tv.data.model.MediaType.MOVIE }
                 val shows = filmography.filter { it.type == com.streambert.tv.data.model.MediaType.TV }
@@ -38,6 +40,9 @@ class PersonViewModel(
                 _state.value = BrowseUiState(
                     loading = false,
                     title = name,
+                    // The cast member's own portrait photo as the hero backdrop;
+                    // falls back to a filmography backdrop if they have no photo.
+                    heroImageUrl = profileUrl,
                     hero = filmography.firstOrNull { it.backdropUrl != null } ?: filmography.firstOrNull(),
                     rows = rows,
                     error = if (rows.isEmpty()) "No filmography found for $name." else null

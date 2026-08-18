@@ -188,6 +188,18 @@ class TmdbRepository(
     }
 
     /**
+     * The person's display name + profile photo URL (portrait headshot, h632)
+     * in a single TMDB call — used to show the cast member's own photo as the
+     * hero backdrop on their filmography screen. Returns ("", null) on failure.
+     */
+    suspend fun personHeader(personId: Int): Pair<String, String?> = try {
+        val d = api.personDetails(personId, lang())
+        d.name.orEmpty() to tmdbImage(d.profilePath, "h632")
+    } catch (_: Exception) {
+        "" to null
+    }
+
+    /**
      * A person's movie + TV filmography (from combined_credits), most popular
      * first, de-duplicated by title and filtered to items that have a poster.
      */
