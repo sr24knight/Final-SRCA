@@ -38,6 +38,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -577,9 +579,9 @@ fun HomeHero(
 }
 
 /**
- * Muted, controller-less ExoPlayer that plays a resolved trailer [stream] inside
- * the hero. Reuses the same lightweight ExoPlayer approach as the full-screen
- * TrailerScreen (progressive, or merged video+audio for adaptive). The player is
+ * Controller-less ExoPlayer that plays a resolved trailer [stream] (with sound)
+ * inside the hero. Reuses the same lightweight ExoPlayer approach as the full-
+ * screen TrailerScreen (progressive, or merged video+audio for adaptive). The player is
  * keyed on the stream URL so a new hero title rebuilds it, and it's released in
  * onDispose when this leaves composition (hero change / navigation away).
  */
@@ -600,7 +602,16 @@ private fun HeroTrailerLayer(stream: TrailerStream) {
                     ProgressiveMediaSource.Factory(dsf).createMediaSource(MediaItem.fromUri(stream.audioUrl))
                 )
             }
-            volume = 0f                       // muted preview
+            // Play WITH sound in the hero. handleAudioFocus = true so it ducks/
+            // stops any other audio while previewing and gives focus back when
+            // the player is released on hero change / navigation away.
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                /* handleAudioFocus = */ true
+            )
             repeatMode = Player.REPEAT_MODE_OFF
             setMediaSource(source)
             prepare()
